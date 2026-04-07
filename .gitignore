@@ -1,0 +1,11 @@
+.DS_Store
+.ipynb_checkpoints/
+.tmp_venv/
+.venv/
+__pycache__/
+
+data/processed/*
+!data/processed/.gitkeep
+
+reports/figures/*
+!reports/figures/.gitkeep
