@@ -1,6 +1,6 @@
 from typing import List
 import string
-from prosperity3bt.datamodel import OrderDepth, UserId, TradingState, Order
+from datamodel import OrderDepth, UserId, TradingState, Order
 
 class Trader:
 

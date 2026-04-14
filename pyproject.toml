@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "ipykernel>=6.29.5",
+  "jsonpickle>=4.1.1",
   "jupyterlab>=4.4.0",
   "matplotlib>=3.10.0",
   "numpy>=2.2.0",
