@@ -9,3 +9,5 @@ data/processed/*
 
 reports/figures/*
 !reports/figures/.gitkeep
+
+/backtests/*
