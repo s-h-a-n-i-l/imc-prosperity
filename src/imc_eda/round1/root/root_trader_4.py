@@ -9,17 +9,18 @@ from datamodel import Order, OrderDepth, TradingState
 class Trader:
     PEPPER = "INTARIAN_PEPPER_ROOT"
 
-    MAX_POSITION = 20
-    ORDER_SIZE = 5
+    MAX_POSITION = 80
+    ORDER_SIZE = 6
 
-    LINEAR_WINDOW = 10
+    LINEAR_WINDOW = 40
     RESIDUAL_WINDOW = 25
-    BASE_K = 1.8
-    MIN_SIGMA = 0.25
-    INVENTORY_SKEW = 0.4
+    BASE_K = 2.3
+    MIN_SIGMA = 0.5
+    INVENTORY_SKEW = 0.1
 
     MAX_AGGRESSION = 2
     K_TIGHTEN_PER_MISS = 0.15
+    STEP_SIZE = 1
 
     def run(self, state: TradingState):
         memory = self._load_memory(state.traderData)
@@ -82,6 +83,9 @@ class Trader:
         sell_k = max(self.BASE_K - sell_miss_count * self.K_TIGHTEN_PER_MISS, 0.6)
         upper = sell_k * sigma
         lower = -buy_k * sigma
+        strong_buy = adjusted_residual < 1.5 * lower
+        strong_sell = adjusted_residual > 1.5 * upper
+        exit_long = position > 0 and adjusted_residual > 0
 
         orders: List[Order] = []
         signal_side = 0
@@ -90,12 +94,21 @@ class Trader:
             signal_side = 1
         elif adjusted_residual > upper:
             signal_side = -1
+        elif exit_long:
+            signal_side = -1
 
         target_price: Optional[int] = None
         if signal_side > 0:
             quantity = self._buy_capacity(position, self.ORDER_SIZE)
             if quantity > 0:
-                target_price = min(best_bid + buy_aggression, best_ask)
+                passive_price = best_bid + buy_aggression * self.STEP_SIZE
+
+                if strong_buy and best_ask < fair_value:
+                    target_price = best_ask
+                elif passive_price < fair_value:
+                    target_price = passive_price
+                else:
+                    return [], memory
                 orders.append(Order(self.PEPPER, target_price, quantity))
                 action = "buy"
                 memory["pending_buy_order"] = {
@@ -107,7 +120,10 @@ class Trader:
         elif signal_side < 0:
             quantity = self._sell_capacity(position, self.ORDER_SIZE)
             if quantity > 0:
-                target_price = max(best_ask - sell_aggression, best_bid)
+                if exit_long or strong_sell:
+                    target_price = best_bid
+                else:
+                    target_price = best_ask - sell_aggression * self.STEP_SIZE
                 orders.append(Order(self.PEPPER, target_price, -quantity))
                 action = "sell"
                 memory["pending_sell_order"] = {
@@ -146,9 +162,9 @@ class Trader:
 
         sample_count = len(price_history)
         if sample_count == 1:
+            fair_value = float(price_history[0])
             slope = 0.0
-            intercept = float(price_history[0])
-            fair_value = intercept
+            intercept = fair_value
         else:
             x_values = [float(index) for index in range(sample_count)]
             x_mean = sum(x_values) / sample_count

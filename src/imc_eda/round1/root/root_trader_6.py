@@ -9,17 +9,11 @@ from datamodel import Order, OrderDepth, TradingState
 class Trader:
     PEPPER = "INTARIAN_PEPPER_ROOT"
 
-    MAX_POSITION = 20
-    ORDER_SIZE = 5
-
-    LINEAR_WINDOW = 10
+    MAX_POSITION = 80
+    BASE_POSITION_TARGET = 60
+    LINEAR_WINDOW = 40
     RESIDUAL_WINDOW = 25
-    BASE_K = 1.8
-    MIN_SIGMA = 0.25
-    INVENTORY_SKEW = 0.4
-
-    MAX_AGGRESSION = 2
-    K_TIGHTEN_PER_MISS = 0.15
+    MIN_SIGMA = 0.5
 
     def run(self, state: TradingState):
         memory = self._load_memory(state.traderData)
@@ -77,25 +71,29 @@ class Trader:
             side="sell",
         )
 
-        adjusted_residual = residual - self.INVENTORY_SKEW * position
-        buy_k = max(self.BASE_K - buy_miss_count * self.K_TIGHTEN_PER_MISS, 0.6)
-        sell_k = max(self.BASE_K - sell_miss_count * self.K_TIGHTEN_PER_MISS, 0.6)
-        upper = sell_k * sigma
-        lower = -buy_k * sigma
-
         orders: List[Order] = []
         signal_side = 0
         action = "hold"
-        if adjusted_residual < lower:
-            signal_side = 1
-        elif adjusted_residual > upper:
-            signal_side = -1
-
         target_price: Optional[int] = None
-        if signal_side > 0:
-            quantity = self._buy_capacity(position, self.ORDER_SIZE)
+
+        if best_bid > fair_value and position > 0:
+            signal_side = -1
+            quantity = self._sell_capacity(position)
             if quantity > 0:
-                target_price = min(best_bid + buy_aggression, best_ask)
+                target_price = best_bid
+                orders.append(Order(self.PEPPER, target_price, -quantity))
+                action = "sell"
+                memory["pending_sell_order"] = {
+                    "side": "sell",
+                    "timestamp": timestamp,
+                    "price": target_price,
+                    "position_before": position,
+                }
+        elif position < self.BASE_POSITION_TARGET:
+            signal_side = 1
+            quantity = max(self.BASE_POSITION_TARGET - position, 0)
+            if quantity > 0:
+                target_price = best_ask
                 orders.append(Order(self.PEPPER, target_price, quantity))
                 action = "buy"
                 memory["pending_buy_order"] = {
@@ -104,14 +102,15 @@ class Trader:
                     "price": target_price,
                     "position_before": position,
                 }
-        elif signal_side < 0:
-            quantity = self._sell_capacity(position, self.ORDER_SIZE)
+        elif position < self.MAX_POSITION and best_ask < fair_value:
+            signal_side = 1
+            quantity = self._buy_capacity(position)
             if quantity > 0:
-                target_price = max(best_ask - sell_aggression, best_bid)
-                orders.append(Order(self.PEPPER, target_price, -quantity))
-                action = "sell"
-                memory["pending_sell_order"] = {
-                    "side": "sell",
+                target_price = best_ask
+                orders.append(Order(self.PEPPER, target_price, quantity))
+                action = "buy"
+                memory["pending_buy_order"] = {
+                    "side": "buy",
                     "timestamp": timestamp,
                     "price": target_price,
                     "position_before": position,
@@ -123,11 +122,11 @@ class Trader:
         memory["last_action"] = action
         memory["last_sigma"] = sigma
         memory["last_residual"] = residual
-        memory["last_adjusted_residual"] = adjusted_residual
-        memory["last_upper_threshold"] = upper
-        memory["last_lower_threshold"] = lower
-        memory["last_buy_k"] = buy_k
-        memory["last_sell_k"] = sell_k
+        memory["last_adjusted_residual"] = residual
+        memory["last_upper_threshold"] = 0.0
+        memory["last_lower_threshold"] = 0.0
+        memory["last_buy_k"] = 0.0
+        memory["last_sell_k"] = 0.0
         memory["buy_aggression_level"] = buy_aggression
         memory["sell_aggression_level"] = sell_aggression
         memory["buy_miss_count"] = buy_miss_count
@@ -146,9 +145,9 @@ class Trader:
 
         sample_count = len(price_history)
         if sample_count == 1:
+            fair_value = float(price_history[0])
             slope = 0.0
-            intercept = float(price_history[0])
-            fair_value = intercept
+            intercept = fair_value
         else:
             x_values = [float(index) for index in range(sample_count)]
             x_mean = sum(x_values) / sample_count
@@ -188,7 +187,7 @@ class Trader:
         miss_count = int(memory.get(miss_key, 0))
 
         if not pending_order:
-            return min(int(memory.get(aggression_key, 0)), self.MAX_AGGRESSION), miss_count
+            return min(int(memory.get(aggression_key, 0)), 2), miss_count
 
         filled = self._pending_order_filled(
             pending_order=pending_order,
@@ -201,14 +200,14 @@ class Trader:
         if filled:
             memory[pending_key] = {}
             reduced_miss_count = max(miss_count - 1, 0)
-            reduced_aggression = min(reduced_miss_count, self.MAX_AGGRESSION)
+            reduced_aggression = min(reduced_miss_count, 2)
             return reduced_aggression, reduced_miss_count
 
         if timestamp > int(pending_order.get("timestamp", timestamp)):
             miss_count += 1
             memory[pending_key] = {}
 
-        aggression_level = min(miss_count, self.MAX_AGGRESSION)
+        aggression_level = min(miss_count, 2)
         return aggression_level, miss_count
 
     def _pending_order_filled(
@@ -247,12 +246,11 @@ class Trader:
         best_ask = min(order_depth.sell_orders) if order_depth.sell_orders else None
         return best_bid, best_ask
 
-    def _buy_capacity(self, position: int, preferred_size: int) -> int:
-        return max(min(preferred_size, self.MAX_POSITION - position), 0)
+    def _buy_capacity(self, position: int) -> int:
+        return max(self.MAX_POSITION - position, 0)
 
-    def _sell_capacity(self, position: int, preferred_size: int) -> int:
-        # Only allow inventory-reducing sells; do not open new short positions.
-        return max(min(preferred_size, position), 0)
+    def _sell_capacity(self, position: int) -> int:
+        return max(min(self.MAX_POSITION, position), 0)
 
     def _load_memory(self, trader_data: str) -> dict:
         if not trader_data:
