@@ -9,17 +9,18 @@ from datamodel import Order, OrderDepth, TradingState
 class Trader:
     PEPPER = "INTARIAN_PEPPER_ROOT"
 
-    MAX_POSITION = 20
-    ORDER_SIZE = 5
+    MAX_POSITION = 80
+    ORDER_SIZE = 6
 
-    LINEAR_WINDOW = 10
+    LINEAR_WINDOW = 1000
     RESIDUAL_WINDOW = 25
-    BASE_K = 1.8
+    BASE_K = 1.4
     MIN_SIGMA = 0.25
-    INVENTORY_SKEW = 0.4
+    INVENTORY_SKEW = 0.1
 
-    MAX_AGGRESSION = 2
+    MAX_AGGRESSION = 5
     K_TIGHTEN_PER_MISS = 0.15
+    STEP_SIZE = 3
 
     def run(self, state: TradingState):
         memory = self._load_memory(state.traderData)
@@ -95,7 +96,7 @@ class Trader:
         if signal_side > 0:
             quantity = self._buy_capacity(position, self.ORDER_SIZE)
             if quantity > 0:
-                target_price = min(best_bid + buy_aggression, best_ask)
+                target_price = min(best_bid + buy_aggression*self.STEP_SIZE, best_ask)
                 orders.append(Order(self.PEPPER, target_price, quantity))
                 action = "buy"
                 memory["pending_buy_order"] = {
@@ -107,7 +108,7 @@ class Trader:
         elif signal_side < 0:
             quantity = self._sell_capacity(position, self.ORDER_SIZE)
             if quantity > 0:
-                target_price = max(best_ask - sell_aggression, best_bid)
+                target_price = max(best_ask - sell_aggression*self.STEP_SIZE, best_bid)
                 orders.append(Order(self.PEPPER, target_price, -quantity))
                 action = "sell"
                 memory["pending_sell_order"] = {
@@ -146,9 +147,9 @@ class Trader:
 
         sample_count = len(price_history)
         if sample_count == 1:
+            fair_value = float(price_history[0])
             slope = 0.0
-            intercept = float(price_history[0])
-            fair_value = intercept
+            intercept = fair_value
         else:
             x_values = [float(index) for index in range(sample_count)]
             x_mean = sum(x_values) / sample_count

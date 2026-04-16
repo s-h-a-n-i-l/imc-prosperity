@@ -1,0 +1,7 @@
+check,passed
+No lookahead fills,True
+Taker fills stay within visible 3-level depth,True
+Passive fills never occur in empty books,True
+Inventory never breaches limit,True
+Each day ends flat,True
+Summary PnL matches daily and trade-log totals,True
