@@ -1,0 +1,7 @@
+candidate_label,anchor_lookback,base_half_spread,inventory_skew,imbalance_skew,dislocation_threshold,defensive_widening_multiplier,enable_dislocation_takers,dislocation_one_sided_only,profile,net_pnl,worst_day_pnl,daily_hit_rate,fill_count,passive_share,taker_fills,buy_fills,sell_fills,max_abs_inventory,near_limit_share,avg_signed_mid_move_5,forced_flat_turnover
+A,30,4.0,0.4,1.0,5.0,2.0,False,True,strict,3496.0,1081.0,1.0,273,0.989010989010989,3,133,140,14.5,0.0,-0.6974153297682709,25.0
+A,30,4.0,0.4,1.0,5.0,2.0,False,True,loose,9809.375,3015.5,1.0,1317,0.9977220956719818,3,642,675,16.75,0.015033333333333333,-2.8350154191197086,12.75
+B,40,4.0,0.2,1.0,5.0,2.0,False,True,strict,3478.5,1074.5,1.0,277,0.9891696750902527,3,136,141,15.0,0.023333333333333334,-0.6508007117437722,24.0
+B,40,4.0,0.2,1.0,5.0,2.0,False,True,loose,9740.5,2982.125,1.0,1343,0.9977661950856291,3,655,688,16.75,0.053766666666666664,-2.8683158010081087,17.5
+C,30,5.0,0.2,1.0,5.0,1.5,False,True,strict,3397.0,999.5,1.0,273,0.989010989010989,3,134,139,15.0,0.0109,-0.7235663082437276,26.0
+C,30,5.0,0.2,1.0,5.0,1.5,False,True,loose,9695.625,3068.5,1.0,1336,0.9977544910179641,3,651,685,16.75,0.0415,-2.854052558782849,15.75

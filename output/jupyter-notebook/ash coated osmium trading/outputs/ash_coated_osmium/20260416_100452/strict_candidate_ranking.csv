@@ -1,0 +1,4 @@
+strict_rank,candidate_label,profile,net_pnl,worst_day_pnl,fill_count,passive_share,taker_fills,avg_signed_mid_move_5
+1,A,strict,3496.0,1081.0,273,0.989010989010989,3,-0.6974153297682709
+2,B,strict,3478.5,1074.5,277,0.9891696750902527,3,-0.6508007117437722
+3,C,strict,3397.0,999.5,273,0.989010989010989,3,-0.7235663082437276
