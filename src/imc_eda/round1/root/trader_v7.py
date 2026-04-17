@@ -527,9 +527,25 @@ class Trader:
         orders = self._orders_from_plan(snapshot, plan)
 
         memory["effective_limit"] = effective_limit
+        memory["last_fair_value"] = anchor_price
         memory["last_anchor_price"] = anchor_price
         memory["last_mid_price"] = snapshot.mid_price
+        memory["last_best_bid"] = snapshot.best_bid
+        memory["last_best_ask"] = snapshot.best_ask
+        memory["last_top_bid_depth"] = snapshot.top_bid_depth
+        memory["last_top_ask_depth"] = snapshot.top_ask_depth
+        memory["last_total_bid_depth"] = snapshot.total_bid_depth
+        memory["last_total_ask_depth"] = snapshot.total_ask_depth
+        memory["last_book_state"] = snapshot.book_state
         memory["last_regime"] = plan.regime
+        memory["last_reservation_price"] = plan.reservation_price
+        memory["last_imbalance"] = plan.imbalance
+        memory["last_planned_bid"] = plan.planned_bid
+        memory["last_planned_ask"] = plan.planned_ask
+        memory["last_passive_buy_size"] = plan.passive_buy_size
+        memory["last_passive_sell_size"] = plan.passive_sell_size
+        memory["last_taker_side"] = plan.taker_side
+        memory["last_taker_qty"] = plan.taker_qty
         return orders, memory
 
     def _orders_from_plan(self, snapshot: BookSnapshot, plan: QuotePlan) -> list[Order]:
@@ -696,6 +712,25 @@ class Trader:
         osmium_memory = data["osmium"]
         osmium_memory.setdefault("mid_history", [])
         osmium_memory.setdefault("effective_limit", OSMIUM_EXCHANGE_LIMIT)
+        osmium_memory.setdefault("last_fair_value", None)
+        osmium_memory.setdefault("last_anchor_price", None)
+        osmium_memory.setdefault("last_mid_price", None)
+        osmium_memory.setdefault("last_best_bid", None)
+        osmium_memory.setdefault("last_best_ask", None)
+        osmium_memory.setdefault("last_top_bid_depth", 0.0)
+        osmium_memory.setdefault("last_top_ask_depth", 0.0)
+        osmium_memory.setdefault("last_total_bid_depth", 0.0)
+        osmium_memory.setdefault("last_total_ask_depth", 0.0)
+        osmium_memory.setdefault("last_book_state", "empty")
+        osmium_memory.setdefault("last_regime", "standby")
+        osmium_memory.setdefault("last_reservation_price", None)
+        osmium_memory.setdefault("last_imbalance", 0.0)
+        osmium_memory.setdefault("last_planned_bid", None)
+        osmium_memory.setdefault("last_planned_ask", None)
+        osmium_memory.setdefault("last_passive_buy_size", 0.0)
+        osmium_memory.setdefault("last_passive_sell_size", 0.0)
+        osmium_memory.setdefault("last_taker_side", None)
+        osmium_memory.setdefault("last_taker_qty", 0.0)
 
         portfolio = data["portfolio"]
         portfolio.setdefault("starting_cash", None)
@@ -727,6 +762,25 @@ class Trader:
             "osmium": {
                 "mid_history": [],
                 "effective_limit": OSMIUM_EXCHANGE_LIMIT,
+                "last_fair_value": None,
+                "last_anchor_price": None,
+                "last_mid_price": None,
+                "last_best_bid": None,
+                "last_best_ask": None,
+                "last_top_bid_depth": 0.0,
+                "last_top_ask_depth": 0.0,
+                "last_total_bid_depth": 0.0,
+                "last_total_ask_depth": 0.0,
+                "last_book_state": "empty",
+                "last_regime": "standby",
+                "last_reservation_price": None,
+                "last_imbalance": 0.0,
+                "last_planned_bid": None,
+                "last_planned_ask": None,
+                "last_passive_buy_size": 0.0,
+                "last_passive_sell_size": 0.0,
+                "last_taker_side": None,
+                "last_taker_qty": 0.0,
             },
             "portfolio": {
                 "starting_cash": None,
