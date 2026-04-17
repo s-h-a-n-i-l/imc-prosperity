@@ -125,6 +125,14 @@ def _sorted_levels(book: dict[int, int] | dict[float, float], *, reverse: bool) 
     levels = [(int(price), abs(float(volume))) for price, volume in book.items() if float(volume) != 0.0]
     return sorted(levels, key=lambda item: item[0], reverse=reverse)
 
+def _wall_mid(order_depth: OrderDepth) -> Optional[int]:
+    if (not order_depth.buy_orders) or (not order_depth.sell_orders):
+        return None
+
+    # assume the "walls" are at the prices with maximum volume
+    buy_wall = max(order_depth.buy_orders.items(), key=lambda x: x[1])[0]
+    sell_wall = max(order_depth.sell_orders.items(), key=lambda x: x[1])[0]
+    return (buy_wall + sell_wall) / 2
 
 def build_book_snapshot(order_depth: OrderDepth, fallback_mid: float | None = None) -> BookSnapshot:
     buy_orders = getattr(order_depth, "buy_orders", {}) or {}
@@ -141,7 +149,7 @@ def build_book_snapshot(order_depth: OrderDepth, fallback_mid: float | None = No
     total_ask_depth = sum(volume for _, volume in ask_levels[:3])
 
     if best_bid is not None and best_ask is not None:
-        mid_price = (best_bid + best_ask) / 2.0
+        mid_price = _wall_mid(order_depth)
         book_state = "both_sides"
     elif best_bid is not None:
         mid_price = fallback_mid
@@ -388,9 +396,9 @@ class Trader:
     ) -> tuple[list[Order], dict[str, Any]]:
         best_bid, best_ask = self._top_of_book(order_depth)
         if best_bid is None or best_ask is None or max_position <= 0:
-            return [], memory
+            return [], memory # TODO: we can still do some things if there aren't bids or asks... like trying to market make (but not worth it really)
 
-        current_price = (best_bid + best_ask) / 2.0
+        current_price = _wall_mid(order_depth)
         fair_value, slope, intercept = self._update_linear_fair_value(memory, current_price)
 
         residual = current_price - fair_value
@@ -661,15 +669,6 @@ class Trader:
         best_ask = min(order_depth.sell_orders) if order_depth.sell_orders else None
         return best_bid, best_ask
 
-    def _wall_mid(self, order_depth: OrderDepth) -> Optional[int]:
-        if (not order_depth.buy_orders) or (not order_depth.sell_orders):
-            return None
-
-        # assume the "walls" are at the prices with maximum volume
-        buy_wall = max(order_depth.buy_orders.items(), key=lambda x: x.value).key
-        sell_wall = max(order_depth.sell_orders.items(), key=lambda x: x.value).key
-        return (buy_wall + sell_wall) / 2
-
     def _buy_capacity(self, position: int, max_position: int) -> int:
         return max(max_position - position, 0)
 
@@ -783,9 +782,9 @@ class Trader:
             order_depth = state.order_depths.get(product)
             if order_depth is None:
                 continue
-            best_bid, best_ask = self._top_of_book(order_depth)
-            if best_bid is not None and best_ask is not None:
-                mids[product] = (best_bid + best_ask) / 2.0
+            mid = _wall_mid(order_depth)
+            if mid is not None:
+                mids[product] = mid
                 reference_mids[product] = mids[product]
         return mids
 
