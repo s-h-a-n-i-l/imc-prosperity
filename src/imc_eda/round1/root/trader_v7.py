@@ -73,9 +73,9 @@ class SupportsRegimeMMParams(Protocol):
 @dataclass(frozen=True)
 class RegimeMMConfig:
     strategy_name: str = "ASH_COATED_OSMIUM_Candidate_G"
-    anchor_lookback: int = 30
-    base_half_spread: float = 5.0
-    inventory_skew: float = 0.20
+    anchor_lookback: int = 20
+    base_half_spread: float = 7.0
+    inventory_skew: float = 0.10
     imbalance_skew: float = 1.0
     dislocation_threshold: float = 5.0
     defensive_widening_multiplier: float = 1.25
@@ -131,7 +131,7 @@ def _wall_mid(order_depth: OrderDepth) -> Optional[int]:
 
     # assume the "walls" are at the prices with maximum volume
     buy_wall = max(order_depth.buy_orders.items(), key=lambda x: x[1])[0]
-    sell_wall = max(order_depth.sell_orders.items(), key=lambda x: x[1])[0]
+    sell_wall = max(order_depth.sell_orders.items(), key=lambda x: abs(x[1]))[0]
     return (buy_wall + sell_wall) / 2
 
 def build_book_snapshot(order_depth: OrderDepth, fallback_mid: float | None = None) -> BookSnapshot:
@@ -339,10 +339,8 @@ class Trader:
         # ... [Keep run, _trade_osmium, _orders_from_plan, etc. exactly the same] ...
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         memory = self._load_memory(getattr(state, "traderData", ""))
-        self._update_cash_ledger(memory, state)
 
         mids = self._current_mids(state, memory)
-        self._initialize_starting_cash(memory, mids)
 
         result: dict[str, list[Order]] = {}
 
@@ -447,13 +445,6 @@ class Trader:
             orders = [o for o in orders if o.quantity < 0]
             orders.append(Order(PEPPER, int(best_ask), buy_capacity))
             action = "take_ask"
-
-        # If the market bids spike abnormally high, dump our ENTIRE position to lock in profit
-        elif best_bid > (predicted_fair + self.PEPPER_SPIKE_MARGIN) and position > 0:
-            # Remove any passive sells, replace with aggressive full dump
-            orders = [o for o in orders if o.quantity > 0]
-            orders.append(Order(PEPPER, int(best_bid), -position))
-            action = "take_bid_dump"
 
         # (Leave your memory tracking intact so aggressiveness counters don't crash)
         buy_aggression, buy_miss_count = self._update_aggressiveness(
@@ -739,29 +730,6 @@ class Trader:
             },
         }
 
-    def _update_cash_ledger(self, memory: dict[str, Any], state: TradingState) -> None:
-        portfolio = memory["portfolio"]
-        own_trades = getattr(state, "own_trades", {}) or {}
-
-        for product in (PEPPER, OSMIUM):
-            trades = list(own_trades.get(product, []))
-            last_timestamp = int(portfolio["last_trade_timestamp"].get(product, -1))
-            for trade in trades:
-                trade_timestamp = int(getattr(trade, "timestamp", -1))
-                if trade_timestamp <= last_timestamp:
-                    continue
-
-                quantity = int(abs(getattr(trade, "quantity", 0)))
-                price = float(getattr(trade, "price", 0))
-                if getattr(trade, "buyer", None) == "SUBMISSION":
-                    portfolio["cash"][product] -= price * quantity
-                elif getattr(trade, "seller", None) == "SUBMISSION":
-                    portfolio["cash"][product] += price * quantity
-
-                last_timestamp = max(last_timestamp, trade_timestamp)
-
-            portfolio["last_trade_timestamp"][product] = last_timestamp
-
     def _current_mids(self, state: TradingState, memory: dict[str, Any]) -> dict[str, float]:
         reference_mids = memory["portfolio"]["reference_mids"]
         mids = {PEPPER: float(reference_mids.get(PEPPER, PEPPER_REFERENCE_MID)),
@@ -776,11 +744,3 @@ class Trader:
                 mids[product] = mid
                 reference_mids[product] = mids[product]
         return mids
-
-    def _initialize_starting_cash(self, memory: dict[str, Any], mids: dict[str, float]) -> None:
-        portfolio = memory["portfolio"]
-        if portfolio["starting_cash"] is not None:
-            return
-
-        pepper_mid = mids.get(PEPPER, PEPPER_REFERENCE_MID)
-        portfolio["starting_cash"] = pepper_mid * PEPPER_EXCHANGE_LIMIT / PEPPER_STARTING_CASH_PROPORTION
