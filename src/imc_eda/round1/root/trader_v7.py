@@ -46,7 +46,7 @@ PEPPER_STARTING_CASH_PROPORTION = 0.80
 OSMIUM_STARTING_CASH_PROPORTION = 0.20
 
 PEPPER_EXCHANGE_LIMIT = 80
-OSMIUM_EXCHANGE_LIMIT = 60
+OSMIUM_EXCHANGE_LIMIT = 80
 PEPPER_REFERENCE_MID = 10400.0
 OSMIUM_REFERENCE_MID = 10000.0
 
@@ -343,45 +343,34 @@ class Trader:
 
         mids = self._current_mids(state, memory)
         self._initialize_starting_cash(memory, mids)
-        budgets = self._build_budgets(memory, state, mids)
 
         result: dict[str, list[Order]] = {}
 
         pepper_depth = state.order_depths.get(PEPPER)
         if pepper_depth is not None:
-            pepper_limit = self._budget_position_limit(
-                budget=budgets["pepper_budget"],
-                mid_price=mids[PEPPER],
-                exchange_limit=PEPPER_EXCHANGE_LIMIT,
-            )
             pepper_orders, pepper_memory = self._trade_pepper(
                 order_depth=pepper_depth,
                 position=int(state.position.get(PEPPER, 0)),
                 own_trades=list(getattr(state, "own_trades", {}).get(PEPPER, [])),
                 memory=memory.get("pepper", {}),
                 timestamp=int(state.timestamp),
-                max_position=pepper_limit,
+                max_position=PEPPER_EXCHANGE_LIMIT,
             )
             result[PEPPER] = pepper_orders
             memory["pepper"] = pepper_memory
-            memory["portfolio"]["limits"][PEPPER] = pepper_limit
+            memory["portfolio"]["limits"][PEPPER] = PEPPER_EXCHANGE_LIMIT
 
         osmium_depth = state.order_depths.get(OSMIUM)
         if osmium_depth is not None:
-            osmium_limit = self._budget_position_limit(
-                budget=budgets["osmium_budget"],
-                mid_price=mids[OSMIUM],
-                exchange_limit=OSMIUM_EXCHANGE_LIMIT,
-            )
             osmium_orders, osmium_memory = self._trade_osmium(
                 order_depth=osmium_depth,
                 position=float(state.position.get(OSMIUM, 0)),
                 memory=memory.get("osmium", {}),
-                effective_limit=osmium_limit,
+                effective_limit=OSMIUM_EXCHANGE_LIMIT,
             )
             result[OSMIUM] = osmium_orders
             memory["osmium"] = osmium_memory
-            memory["portfolio"]["limits"][OSMIUM] = osmium_limit
+            memory["portfolio"]["limits"][OSMIUM] = OSMIUM_EXCHANGE_LIMIT
 
         return result, 0, json.dumps(memory, separators=(",", ":"))
 
@@ -795,32 +784,3 @@ class Trader:
 
         pepper_mid = mids.get(PEPPER, PEPPER_REFERENCE_MID)
         portfolio["starting_cash"] = pepper_mid * PEPPER_EXCHANGE_LIMIT / PEPPER_STARTING_CASH_PROPORTION
-
-    def _build_budgets(
-        self,
-        memory: dict[str, Any],
-        state: TradingState,
-        mids: dict[str, float],
-    ) -> dict[str, float]:
-        portfolio = memory["portfolio"]
-        starting_cash = float(portfolio["starting_cash"] or 0.0)
-
-        total_pnl = 0.0
-        for product in (PEPPER, OSMIUM):
-            product_cash = float(portfolio["cash"].get(product, 0.0))
-            position = float(state.position.get(product, 0))
-            total_pnl += product_cash + position * mids[product]
-
-        portfolio["last_total_pnl"] = total_pnl
-        pepper_budget = starting_cash * PEPPER_STARTING_CASH_PROPORTION + max(total_pnl, 0.0)
-        osmium_budget = starting_cash * OSMIUM_STARTING_CASH_PROPORTION
-        return {
-            "pepper_budget": pepper_budget,
-            "osmium_budget": osmium_budget,
-        }
-
-    def _budget_position_limit(self, budget: float, mid_price: float, exchange_limit: int) -> int:
-        if mid_price <= 0:
-            return exchange_limit
-        budget_limit = int(math.floor(budget / mid_price))
-        return max(0, min(exchange_limit, budget_limit))
