@@ -318,11 +318,11 @@ class Trader:
 
     # --- NEW TUNABLE PARAMETERS FOR PEPPER ---
     # The fraction of your max limit to hold passively for trend growth (e.g., 0.75 * 80 = 60)
-    PEPPER_CORE_FRACTION = 0.75 
-    # The minimum edge (in seashells) from fair value to place a passive quote
-    PEPPER_MIN_MARGIN = 0.5      
+    PEPPER_CORE_FRACTION = 0.90
+    # The minimum edge from fair value to place a passive quote
+    PEPPER_MIN_MARGIN = 1
     # The distance above fair value to trigger dumping your ENTIRE position (spike catching)
-    PEPPER_SPIKE_MARGIN = 2.0    
+    PEPPER_SPIKE_MARGIN = 5.0
     # -----------------------------------------
 
     def __init__(self, params: SupportsRegimeMMParams | None = None) -> None:
@@ -400,22 +400,22 @@ class Trader:
         memory["residual_history"] = residual_history
 
         sigma = self._rolling_std(residual_history)
-        
+
         # --- PHASE 1 & 2: Prediction and Capacities ---
         # Project fair value one tick into the future
-        predicted_fair = fair_value + slope 
+        predicted_fair = fair_value + slope
         z_score = residual / sigma if sigma > 0 else 0
 
         # Determine how much we want to hold permanently vs market make
         core_target = int(max_position * self.PEPPER_CORE_FRACTION)
-        
+
         buy_capacity = self._buy_capacity(position, max_position)
         # Only allow passive selling if we exceed our "Core" trend-following position
         sell_capacity = max(0, position - core_target)
 
         orders: list[Order] = []
         action = "hold"
-        
+
         # --- PHASE 3: Pennying Logic (Passive Bidding) ---
         # Step inside the spread if it's wide enough, otherwise join the best quote
         my_bid = best_bid + 1 if best_ask - best_bid > 1 else best_bid
@@ -444,13 +444,13 @@ class Trader:
             }
 
         # --- PHASE 4: Aggressive Sniping (Override Passive) ---
-        # If the market asks are actively cheaper than our predicted fair value, hit them!
-        if best_ask < predicted_fair and buy_capacity > 0:
+        # If the market asks are actively cheaper than our predicted fair value, or we aren't holding enough peppers, hit them!
+        if (best_ask < predicted_fair and buy_capacity > 0) or (buy_capacity > 10):
             # Remove any passive buys, replace with aggressive take
-            orders = [o for o in orders if o.quantity < 0] 
+            orders = [o for o in orders if o.quantity < 0]
             orders.append(Order(PEPPER, int(best_ask), buy_capacity))
             action = "take_ask"
-            
+
         # If the market bids spike abnormally high, dump our ENTIRE position to lock in profit
         elif best_bid > (predicted_fair + self.PEPPER_SPIKE_MARGIN) and position > 0:
             # Remove any passive sells, replace with aggressive full dump
@@ -565,8 +565,8 @@ class Trader:
         memory["price_history"] = price_history
 
         sample_count = len(price_history)
-        if sample_count == 1:
-            fair_value = float(price_history[0])
+        if sample_count <= 10: # when we don't have many samples, linear prediction is unreliable
+            fair_value = float(price_history[-1])
             slope = 0.0
             intercept = fair_value
         else:
@@ -660,6 +660,15 @@ class Trader:
         best_bid = max(order_depth.buy_orders) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders) if order_depth.sell_orders else None
         return best_bid, best_ask
+
+    def _wall_mid(self, order_depth: OrderDepth) -> Optional[int]:
+        if (not order_depth.buy_orders) or (not order_depth.sell_orders):
+            return None
+
+        # assume the "walls" are at the prices with maximum volume
+        buy_wall = max(order_depth.buy_orders.items(), key=lambda x: x.value).key
+        sell_wall = max(order_depth.sell_orders.items(), key=lambda x: x.value).key
+        return (buy_wall + sell_wall) / 2
 
     def _buy_capacity(self, position: int, max_position: int) -> int:
         return max(max_position - position, 0)
