@@ -73,8 +73,8 @@ class SupportsRegimeMMParams(Protocol):
 @dataclass(frozen=True)
 class RegimeMMConfig:
     strategy_name: str = "ASH_COATED_OSMIUM_Candidate_G"
-    anchor_lookback: int = 20
-    base_half_spread: float = 7.0
+    anchor_lookback: int = 30
+    base_half_spread: float = 5.0
     inventory_skew: float = 0.10
     imbalance_skew: float = 1.0
     dislocation_threshold: float = 5.0
@@ -329,8 +329,6 @@ class Trader:
     PEPPER_CORE_FRACTION = 0.90
     # The minimum edge from fair value to place a passive quote
     PEPPER_MIN_MARGIN = 1
-    # The distance above fair value to trigger dumping your ENTIRE position (spike catching)
-    PEPPER_SPIKE_MARGIN = 5.0
     # -----------------------------------------
 
     def __init__(self, params: SupportsRegimeMMParams | None = None) -> None:
