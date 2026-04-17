@@ -267,6 +267,12 @@ def build_quote_plan(
     if snapshot.best_bid is not None:
         planned_bid = snapshot.best_bid + 1
 
+    # override the calculated prices if there are market orders we can beat
+    if snapshot.best_ask is not None:
+        planned_ask = snapshot.best_ask - 1 # use min() here? will we ever want to give them a better deal?
+    if snapshot.best_bid is not None:
+        planned_bid = snapshot.best_bid + 1 # use max() here?
+
     buy_capacity = capacity_for_side(position, "buy", params.inventory_hard_limit)
     sell_capacity = capacity_for_side(position, "sell", params.inventory_hard_limit)
     allow_buy = buy_capacity > 0.0
