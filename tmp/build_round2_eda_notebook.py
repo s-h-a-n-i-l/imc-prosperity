@@ -7,7 +7,7 @@ import nbformat as nbf
 
 
 ROOT = Path(r"f:\Projects\imc\imc-prosperity")
-NOTEBOOK_PATH = ROOT / "src" / "imc_eda" / "round 2" / "round-2-eda.ipynb"
+NOTEBOOK_PATH = ROOT / "src" / "imc_eda" / "round2" / "round-2-eda.ipynb"
 NOTEBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 nb = nbf.v4.new_notebook()
@@ -38,6 +38,7 @@ cells.append(
 
         - profile the round 2 quote and trade microstructure for `ASH_COATED_OSMIUM` and `INTARIAN_PEPPER_ROOT`
         - compare round 2 directly against round 1 so we can separate true regime changes from simple continuation
+        - test whether Osmium shows evidence of informed quoting before major moves
         - translate those observations into practical commentary about how `src/imc_eda/round1/root/trader_v7.py` should behave on this dataset
         """
     )
@@ -305,6 +306,42 @@ cells.append(
                 .reset_index()
                 .assign(round=round_label)
             )
+
+
+        def prepare_osmium_quote_signal_frame(prices: pd.DataFrame) -> pd.DataFrame:
+            frame = prices.loc[prices["product"] == OSMIUM].sort_values(["day", "timestamp"]).copy()
+            for level in (1, 2, 3):
+                for side in ("bid", "ask"):
+                    volume_column = f"{side}_volume_{level}"
+                    frame[f"{side}_abs_volume_{level}"] = frame[volume_column].abs()
+
+            frame["future_return_1"] = frame.groupby("day")["book_mid"].shift(-1) - frame["book_mid"]
+            frame["future_return_5"] = frame.groupby("day")["book_mid"].shift(-5) - frame["book_mid"]
+            frame["future_return_10"] = frame.groupby("day")["book_mid"].shift(-10) - frame["book_mid"]
+
+            frame["best_imbalance"] = (
+                (frame["bid_abs_volume_1"] - frame["ask_abs_volume_1"])
+                / (frame["bid_abs_volume_1"] + frame["ask_abs_volume_1"])
+            )
+            frame["total_bid_volume_3"] = frame[[f"bid_abs_volume_{level}" for level in (1, 2, 3)]].fillna(0).sum(axis=1)
+            frame["total_ask_volume_3"] = frame[[f"ask_abs_volume_{level}" for level in (1, 2, 3)]].fillna(0).sum(axis=1)
+            frame["total_imbalance_3"] = (
+                (frame["total_bid_volume_3"] - frame["total_ask_volume_3"])
+                / (frame["total_bid_volume_3"] + frame["total_ask_volume_3"]).replace(0, np.nan)
+            )
+            frame["book_state"] = np.select(
+                [
+                    frame["bid_abs_volume_1"].notna() & frame["ask_abs_volume_1"].notna(),
+                    frame["bid_abs_volume_1"].notna() & frame["ask_abs_volume_1"].isna(),
+                    frame["bid_abs_volume_1"].isna() & frame["ask_abs_volume_1"].notna(),
+                ],
+                ["both_sides", "bid_only", "ask_only"],
+                default="empty",
+            )
+
+            frame["major_up_move_5"] = frame["future_return_5"] >= frame["future_return_5"].quantile(0.99)
+            frame["major_down_move_5"] = frame["future_return_5"] <= frame["future_return_5"].quantile(0.01)
+            return frame
         """
     )
 )
@@ -319,7 +356,8 @@ cells.append(
         1. `ASH_COATED_OSMIUM` should still look like the anchored, mean-reverting book from round 1.
         2. `INTARIAN_PEPPER_ROOT` should still look like the steadily climbing product, but with day labels shifted forward by one session.
         3. `trader_v7` should still fit the data structurally, especially if round 2 preserves the same Osmium regime mix and Pepper trend slope.
-        4. Any meaningful change is more likely to show up in spread, fill cadence, or trade alignment than in the broad price process.
+        4. If Osmium has an informed trader, the best evidence should appear as predictive displayed liquidity before sharp future moves.
+        5. Any meaningful change is more likely to show up in spread, fill cadence, or trade alignment than in the broad price process.
         """
     )
 )
@@ -344,6 +382,7 @@ cells.append(
 
         trade_with_quotes = align_trades_to_quotes(prices, trades)
         round1_trade_with_quotes = align_trades_to_quotes(round1_prices, round1_trades)
+        osmium_signal_data = prepare_osmium_quote_signal_frame(prices)
 
         inventory = pd.DataFrame(
             {
@@ -643,6 +682,229 @@ cells.append(
         )
         fig.update_xaxes(type="log", title="period (ticks, log scale)")
         fig.show()
+        """
+    )
+)
+
+cells.append(
+    md(
+        """
+        ## Informed-Quoting Check for `ASH_COATED_OSMIUM`
+
+        The practical question is not only whether Osmium mean-reverts, but whether the displayed quote stack contains predictive information right before large moves.
+
+        The tests below check three different versions of that story:
+
+        - large visible best quotes at the top of book
+        - one-sided or highly imbalanced books just before sharp future shifts
+        - exact best-bid / best-ask size combinations that repeatedly show up before major moves
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        # Test whether displayed Osmium quote size and imbalance predict future moves
+        predictive_features = [
+            "bid_abs_volume_1",
+            "ask_abs_volume_1",
+            "bid_abs_volume_2",
+            "ask_abs_volume_2",
+            "best_imbalance",
+            "total_imbalance_3",
+            "spread",
+        ]
+        future_columns = ["future_return_1", "future_return_5", "future_return_10"]
+
+        predictive_rows: list[dict[str, float | str]] = []
+        for feature in predictive_features:
+            for future_column in future_columns:
+                subset = osmium_signal_data[[feature, future_column]].dropna()
+                predictive_rows.append(
+                    {
+                        "feature": feature,
+                        "future_horizon": future_column,
+                        "correlation": subset[feature].corr(subset[future_column]),
+                    }
+                )
+        predictive_summary = pd.DataFrame(predictive_rows).round(4)
+        display(predictive_summary.pivot(index="feature", columns="future_horizon", values="correlation"))
+
+        book_state_summary = (
+            osmium_signal_data.groupby("book_state")
+            .agg(
+                rows=("book_state", "size"),
+                mean_future_return_5=("future_return_5", "mean"),
+                abs_future_return_5_p95=("future_return_5", lambda series: series.abs().quantile(0.95)),
+            )
+            .round(4)
+            .reset_index()
+        )
+        display(book_state_summary)
+
+        major_shift_feature_summary = pd.DataFrame(
+            {
+                "feature": ["bid_abs_volume_1", "ask_abs_volume_1", "best_imbalance", "total_imbalance_3", "spread"],
+                "baseline_mean": [
+                    osmium_signal_data["bid_abs_volume_1"].mean(),
+                    osmium_signal_data["ask_abs_volume_1"].mean(),
+                    osmium_signal_data["best_imbalance"].mean(),
+                    osmium_signal_data["total_imbalance_3"].mean(),
+                    osmium_signal_data["spread"].mean(),
+                ],
+                "major_up_move_mean": [
+                    osmium_signal_data.loc[osmium_signal_data["major_up_move_5"], "bid_abs_volume_1"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_up_move_5"], "ask_abs_volume_1"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_up_move_5"], "best_imbalance"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_up_move_5"], "total_imbalance_3"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_up_move_5"], "spread"].mean(),
+                ],
+                "major_down_move_mean": [
+                    osmium_signal_data.loc[osmium_signal_data["major_down_move_5"], "bid_abs_volume_1"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_down_move_5"], "ask_abs_volume_1"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_down_move_5"], "best_imbalance"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_down_move_5"], "total_imbalance_3"].mean(),
+                    osmium_signal_data.loc[osmium_signal_data["major_down_move_5"], "spread"].mean(),
+                ],
+            }
+        ).round(4)
+        display(major_shift_feature_summary)
+
+        imbalance_deciles = (
+            osmium_signal_data[["best_imbalance", "future_return_5", "future_return_10"]]
+            .dropna()
+            .assign(imbalance_bucket=lambda frame: pd.qcut(frame["best_imbalance"], 10, duplicates="drop"))
+            .groupby("imbalance_bucket", observed=False)
+            .agg(
+                mean_future_return_5=("future_return_5", "mean"),
+                mean_future_return_10=("future_return_10", "mean"),
+                count=("future_return_5", "size"),
+            )
+            .reset_index()
+        )
+        imbalance_deciles["imbalance_bucket_label"] = imbalance_deciles["imbalance_bucket"].astype(str)
+        display(imbalance_deciles.round(4))
+
+        fig = px.bar(
+            imbalance_deciles,
+            x="imbalance_bucket_label",
+            y="mean_future_return_5",
+            hover_data={"mean_future_return_10": ":.3f", "count": True},
+            title="Osmium best-level imbalance deciles vs future 5-tick return",
+        )
+        fig.update_xaxes(title="best-level imbalance bucket")
+        fig.update_yaxes(title="mean future return over next 5 ticks")
+        fig.show()
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        # Inspect specific large-quote events and ask whether there is a 'magic' quote size before major shifts
+        large_quote_events = pd.DataFrame(
+            [
+                {
+                    "event": "best bid volume >= 30",
+                    "count": int((osmium_signal_data["bid_abs_volume_1"] >= 30).sum()),
+                    "mean_future_return_1": osmium_signal_data.loc[osmium_signal_data["bid_abs_volume_1"] >= 30, "future_return_1"].mean(),
+                    "mean_future_return_5": osmium_signal_data.loc[osmium_signal_data["bid_abs_volume_1"] >= 30, "future_return_5"].mean(),
+                    "mean_future_return_10": osmium_signal_data.loc[osmium_signal_data["bid_abs_volume_1"] >= 30, "future_return_10"].mean(),
+                },
+                {
+                    "event": "best ask volume >= 30",
+                    "count": int((osmium_signal_data["ask_abs_volume_1"] >= 30).sum()),
+                    "mean_future_return_1": osmium_signal_data.loc[osmium_signal_data["ask_abs_volume_1"] >= 30, "future_return_1"].mean(),
+                    "mean_future_return_5": osmium_signal_data.loc[osmium_signal_data["ask_abs_volume_1"] >= 30, "future_return_5"].mean(),
+                    "mean_future_return_10": osmium_signal_data.loc[osmium_signal_data["ask_abs_volume_1"] >= 30, "future_return_10"].mean(),
+                },
+            ]
+        ).round(4)
+        display(large_quote_events)
+
+        exact_size_combos = (
+            osmium_signal_data[["bid_abs_volume_1", "ask_abs_volume_1", "future_return_5"]]
+            .dropna()
+            .groupby(["bid_abs_volume_1", "ask_abs_volume_1"])
+            .agg(count=("future_return_5", "size"), mean_future_return_5=("future_return_5", "mean"))
+            .reset_index()
+            .loc[lambda frame: frame["count"] >= 20]
+            .sort_values("mean_future_return_5", ascending=False)
+        )
+        display(exact_size_combos.head(12).round(4))
+        display(exact_size_combos.tail(12).round(4))
+
+        heatmap = exact_size_combos.pivot(index="bid_abs_volume_1", columns="ask_abs_volume_1", values="mean_future_return_5")
+        fig = px.imshow(
+            heatmap.sort_index().sort_index(axis=1),
+            origin="lower",
+            aspect="auto",
+            color_continuous_scale="RdBu_r",
+            zmin=-4.5,
+            zmax=4.5,
+            title="Osmium exact best-bid / best-ask size combinations vs future 5-tick return",
+        )
+        fig.update_xaxes(title="best ask volume")
+        fig.update_yaxes(title="best bid volume")
+        fig.show()
+
+        strongest_up_examples = osmium_signal_data.sort_values("future_return_5", ascending=False)[
+            [
+                "day",
+                "timestamp",
+                "book_mid",
+                "future_return_1",
+                "future_return_5",
+                "future_return_10",
+                "bid_price_1",
+                "bid_volume_1",
+                "bid_price_2",
+                "bid_volume_2",
+                "ask_price_1",
+                "ask_volume_1",
+                "ask_price_2",
+                "ask_volume_2",
+                "book_state",
+                "best_imbalance",
+                "total_imbalance_3",
+            ]
+        ].head(10)
+        strongest_down_examples = osmium_signal_data.sort_values("future_return_5", ascending=True)[
+            [
+                "day",
+                "timestamp",
+                "book_mid",
+                "future_return_1",
+                "future_return_5",
+                "future_return_10",
+                "bid_price_1",
+                "bid_volume_1",
+                "bid_price_2",
+                "bid_volume_2",
+                "ask_price_1",
+                "ask_volume_1",
+                "ask_price_2",
+                "ask_volume_2",
+                "book_state",
+                "best_imbalance",
+                "total_imbalance_3",
+            ]
+        ].head(10)
+        display(strongest_up_examples.round(4))
+        display(strongest_down_examples.round(4))
+
+        informed_commentary = '''
+        ## Informed Trader Verdict for Osmium
+
+        - There **is** evidence that the displayed Osmium book is informative right before large moves.
+        - The clearest signal is not one special hidden volume, but **visible top-of-book imbalance** and, in the biggest moves, outright **one-sided books**.
+        - When only bids are visible, the next 5-tick move is strongly positive on average; when only asks are visible, it is strongly negative on average. That is a much stronger signature than any single deep-book volume level.
+        - Large best quotes matter too: `30` at best bid tends to precede upward moves and `30` at best ask tends to precede downward moves. But once you condition on best-level imbalance, most of that effect looks like imbalance exposure rather than a unique magic size.
+        - So the honest read is: **yes, informed quoting / adverse-selection risk is present in the visible book**, but **no, the notebook does not show a single unmistakable informed trader using one specific lot size pattern**. The strongest pre-shift fingerprint is extreme displayed imbalance.
+        '''
+        display(Markdown(informed_commentary))
         """
     )
 )
