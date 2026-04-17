@@ -262,6 +262,10 @@ def build_quote_plan(
         passive_size *= params.defensive_size_fraction
 
     planned_bid, planned_ask = _round_quotes(reservation_price, bid_offset, ask_offset)
+    if snapshot.best_ask is not None:
+        planned_ask = snapshot.best_ask - 1
+    if snapshot.best_bid is not None:
+        planned_bid = snapshot.best_bid + 1
 
     buy_capacity = capacity_for_side(position, "buy", params.inventory_hard_limit)
     sell_capacity = capacity_for_side(position, "sell", params.inventory_hard_limit)
