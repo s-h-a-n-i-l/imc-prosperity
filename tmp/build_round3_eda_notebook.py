@@ -6,7 +6,7 @@ from textwrap import dedent
 import nbformat as nbf
 
 
-ROOT = Path(r"f:\Projects\imc\imc-prosperity")
+ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_PATH = ROOT / "src" / "imc_eda" / "round3" / "round-3-eda.ipynb"
 NOTEBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -38,8 +38,9 @@ cells.append(
 
         - profile the round 3 quote and trade microstructure for `HYDROGEL_PACK`, `VELVETFRUIT_EXTRACT`, and the ten `VEV_*` vouchers
         - identify whether `HYDROGEL_PACK` behaves like an anchored mean-reverter, whether `VELVETFRUIT_EXTRACT` behaves like a drifting underlying, and how the voucher ladder maps that underlying
+        - invert voucher mids to Black-Scholes implied volatility, then inspect the smile across strike, time-to-expiry, and moneyness
         - measure where voucher liquidity and trade activity concentrate across strike space
-        - turn those observations into practical strategy guidance for the final-round trader we build next
+        - isolate repeatable IV outliers that look rich or cheap relative to nearby strikes, and turn those observations into practical strategy guidance for the final-round trader we build next
         """
     )
 )
@@ -50,6 +51,7 @@ cells.append(
         # Setup: imports, paths, plotting defaults, and reusable helpers
         from __future__ import annotations
 
+        import math
         import re
         import sys
         from pathlib import Path
@@ -88,6 +90,10 @@ cells.append(
         VOUCHER_PREFIX = "VEV_"
         DELTA1_PRODUCTS = [HYDROGEL, UNDERLYING]
         HYDROGEL_FAIR = 10_000.0
+        TRADING_DAYS_PER_YEAR = 365.0
+        LIQUID_IV_STRIKE_MIN = 5_000.0
+        LIQUID_IV_STRIKE_MAX = 5_500.0
+        TRADEABLE_VEGA_THRESHOLD = 75.0
         STRIKE_PATTERN = re.compile(r"(\\d+)$")
 
 
@@ -227,6 +233,119 @@ cells.append(
             return output
 
 
+        def norm_cdf(values: np.ndarray) -> np.ndarray:
+            return 0.5 * (1.0 + np.vectorize(math.erf)(values / np.sqrt(2.0)))
+
+
+        def black_scholes_call_vectorized(
+            spot: np.ndarray,
+            strike: np.ndarray,
+            time_to_expiry_years: np.ndarray,
+            sigma: np.ndarray,
+        ) -> np.ndarray:
+            intrinsic = np.maximum(spot - strike, 0.0)
+            output = intrinsic.astype(float, copy=True)
+            valid = (
+                (spot > 0)
+                & (strike > 0)
+                & (time_to_expiry_years > 0)
+                & (sigma > 0)
+            )
+            if not np.any(valid):
+                return output
+
+            sqrt_t = np.sqrt(time_to_expiry_years[valid])
+            sigma_valid = sigma[valid]
+            d1 = (
+                np.log(spot[valid] / strike[valid])
+                + 0.5 * np.square(sigma_valid) * time_to_expiry_years[valid]
+            ) / (sigma_valid * sqrt_t)
+            d2 = d1 - sigma_valid * sqrt_t
+            output[valid] = spot[valid] * norm_cdf(d1) - strike[valid] * norm_cdf(d2)
+            return output
+
+
+        def implied_vol_call_vectorized(
+            price: np.ndarray,
+            spot: np.ndarray,
+            strike: np.ndarray,
+            time_to_expiry_years: np.ndarray,
+            iterations: int = 35,
+        ) -> np.ndarray:
+            lower_bound = np.maximum(spot - strike, 0.0)
+            upper_bound = spot
+            implied_vol = np.full(price.shape, np.nan, dtype=float)
+
+            valid = (
+                (spot > 0)
+                & (strike > 0)
+                & (time_to_expiry_years > 0)
+                & (price >= lower_bound - 1e-8)
+                & (price <= upper_bound + 1e-8)
+            )
+            exact_intrinsic = valid & (np.abs(price - lower_bound) < 1e-8)
+            implied_vol[exact_intrinsic] = 0.0
+
+            active = valid & ~exact_intrinsic
+            if not np.any(active):
+                return implied_vol
+
+            low = np.full(price.shape, 1e-6, dtype=float)
+            high = np.full(price.shape, 5.0, dtype=float)
+
+            for _ in range(iterations):
+                mid = 0.5 * (low + high)
+                model_price = black_scholes_call_vectorized(spot, strike, time_to_expiry_years, mid)
+                increase_sigma = model_price < price
+                low = np.where(active & increase_sigma, mid, low)
+                high = np.where(active & ~increase_sigma, mid, high)
+
+            implied_vol[active] = 0.5 * (low[active] + high[active])
+            return implied_vol
+
+
+        def black_scholes_vega_vectorized(
+            spot: np.ndarray,
+            strike: np.ndarray,
+            time_to_expiry_years: np.ndarray,
+            sigma: np.ndarray,
+        ) -> np.ndarray:
+            vega = np.zeros(spot.shape, dtype=float)
+            valid = (
+                (spot > 0)
+                & (strike > 0)
+                & (time_to_expiry_years > 0)
+                & (sigma > 0)
+            )
+            if not np.any(valid):
+                return vega
+
+            sqrt_t = np.sqrt(time_to_expiry_years[valid])
+            sigma_valid = sigma[valid]
+            d1 = (
+                np.log(spot[valid] / strike[valid])
+                + 0.5 * np.square(sigma_valid) * time_to_expiry_years[valid]
+            ) / (sigma_valid * sqrt_t)
+            pdf_d1 = np.exp(-0.5 * np.square(d1)) / np.sqrt(2.0 * np.pi)
+            vega[valid] = spot[valid] * pdf_d1 * sqrt_t
+            return vega
+
+
+        def classify_moneyness_regime(normalized_moneyness: pd.Series) -> pd.Series:
+            return pd.Series(
+                np.select(
+                    [
+                        normalized_moneyness >= 0.75,
+                        normalized_moneyness <= -0.75,
+                        normalized_moneyness.abs() <= 0.25,
+                    ],
+                    ["deep_itm", "deep_otm", "near_atm"],
+                    default="mid_slope",
+                ),
+                index=normalized_moneyness.index,
+            )
+
+
         def prepare_delta1_quote_signal_frame(prices: pd.DataFrame, product_name: str) -> pd.DataFrame:
             frame = prices.loc[prices["product"] == product_name].sort_values(["day", "timestamp"]).copy()
             for level in (1, 2, 3):
@@ -272,15 +391,122 @@ cells.append(
             options = prices.loc[prices["product"].str.startswith(VOUCHER_PREFIX)].copy()
             options["strike"] = options["product"].map(extract_strike)
             options["tte_days"] = 8 - options["day"]
+            options["tte_years"] = options["tte_days"] / TRADING_DAYS_PER_YEAR
             options = options.merge(underlying, on=["day", "timestamp"], how="left")
             options["voucher_mid"] = options["book_mid"]
             options["intrinsic_value"] = (options["underlying_mid"] - options["strike"]).clip(lower=0.0)
             options["option_minus_intrinsic"] = options["voucher_mid"] - options["intrinsic_value"]
             options["moneyness"] = options["underlying_mid"] - options["strike"]
-            options["normalized_moneyness"] = options["moneyness"] / options["underlying_mid"]
+            options["moneyness_ratio"] = options["underlying_mid"] / options["strike"]
+            options["log_moneyness"] = np.log(options["moneyness_ratio"])
+            options["normalized_moneyness"] = options["log_moneyness"] / np.sqrt(options["tte_years"])
             options["voucher_return_1"] = options.groupby(["product", "day"])["voucher_mid"].diff()
             options["voucher_return_5"] = options.groupby(["product", "day"])["voucher_mid"].diff(5)
+            options["implied_vol"] = implied_vol_call_vectorized(
+                price=options["voucher_mid"].to_numpy(dtype=float),
+                spot=options["underlying_mid"].to_numpy(dtype=float),
+                strike=options["strike"].to_numpy(dtype=float),
+                time_to_expiry_years=options["tte_years"].to_numpy(dtype=float),
+            )
+            options["vega"] = black_scholes_vega_vectorized(
+                spot=options["underlying_mid"].to_numpy(dtype=float),
+                strike=options["strike"].to_numpy(dtype=float),
+                time_to_expiry_years=options["tte_years"].to_numpy(dtype=float),
+                sigma=options["implied_vol"].fillna(0.0).to_numpy(dtype=float),
+            )
+            options["iv_defined"] = options["implied_vol"].notna()
+            options["vega_tradeable"] = options["vega"] >= TRADEABLE_VEGA_THRESHOLD
+            options["moneyness_regime"] = classify_moneyness_regime(options["normalized_moneyness"])
             return options.sort_values(["day", "timestamp", "strike"]).reset_index(drop=True)
+
+
+        def summarize_option_iv(option_prices: pd.DataFrame) -> pd.DataFrame:
+            rows: list[dict[str, float | str | int]] = []
+            for (day, product), frame in option_prices.groupby(["day", "product"], sort=True):
+                valid_iv = frame.loc[frame["iv_defined"]]
+                rows.append(
+                    {
+                        "day": day,
+                        "tte_days": int(frame["tte_days"].iloc[0]),
+                        "product": product,
+                        "strike": float(frame["strike"].iloc[0]),
+                        "mean_iv": valid_iv["implied_vol"].mean(),
+                        "std_iv": valid_iv["implied_vol"].std(),
+                        "valid_iv_share": frame["iv_defined"].mean(),
+                        "invalid_iv_share": 1.0 - frame["iv_defined"].mean(),
+                        "mean_vega": valid_iv["vega"].mean(),
+                        "tradeable_vega_share": frame["vega_tradeable"].mean(),
+                        "mean_normalized_moneyness": frame["normalized_moneyness"].mean(),
+                        "below_intrinsic_share": (frame["voucher_mid"] < frame["intrinsic_value"] - 1e-8).mean(),
+                    }
+                )
+            return pd.DataFrame(rows).sort_values(["day", "strike"]).reset_index(drop=True)
+
+
+        def fit_day_level_smile(iv_summary: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+            fit_rows: list[dict[str, float | int]] = []
+            residual_frames: list[pd.DataFrame] = []
+
+            for day, frame in iv_summary.dropna(subset=["mean_iv"]).groupby("day", sort=True):
+                if len(frame) < 5:
+                    continue
+                x = frame["mean_normalized_moneyness"].to_numpy(dtype=float)
+                y = frame["mean_iv"].to_numpy(dtype=float)
+                design = np.column_stack([np.ones(len(x)), x, np.square(x)])
+                coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+                fitted = design @ coef
+
+                enriched = frame.copy()
+                enriched["fitted_iv"] = fitted
+                enriched["iv_residual"] = enriched["mean_iv"] - enriched["fitted_iv"]
+                residual_frames.append(enriched)
+                fit_rows.append(
+                    {
+                        "day": int(day),
+                        "tte_days": int(frame["tte_days"].iloc[0]),
+                        "atm_iv": float(coef[0]),
+                        "linear_term": float(coef[1]),
+                        "curvature": float(coef[2]),
+                    }
+                )
+
+            return (
+                pd.DataFrame(fit_rows).sort_values("day").reset_index(drop=True),
+                pd.concat(residual_frames, ignore_index=True).sort_values(["day", "strike"]).reset_index(drop=True),
+            )
+
+
+        def build_neighbor_iv_outlier_frame(option_prices: pd.DataFrame) -> pd.DataFrame:
+            liquid = option_prices.loc[
+                option_prices["strike"].between(LIQUID_IV_STRIKE_MIN, LIQUID_IV_STRIKE_MAX)
+                & option_prices["iv_defined"]
+            ].copy()
+            if liquid.empty:
+                return pd.DataFrame()
+
+            iv_pivot = liquid.pivot_table(index=["day", "timestamp"], columns="strike", values="implied_vol")
+            vega_pivot = liquid.pivot_table(index=["day", "timestamp"], columns="strike", values="vega")
+
+            frames: list[pd.DataFrame] = []
+            for strike in sorted(iv_pivot.columns):
+                previous_strike = strike - 100.0
+                next_strike = strike + 100.0
+                if previous_strike not in iv_pivot.columns or next_strike not in iv_pivot.columns:
+                    continue
+
+                iv_gap = 0.5 * (iv_pivot[previous_strike] + iv_pivot[next_strike]) - iv_pivot[strike]
+                price_gap = iv_gap * vega_pivot[strike]
+                tmp = pd.DataFrame(
+                    {
+                        "strike": strike,
+                        "product": f"{VOUCHER_PREFIX}{int(strike)}",
+                        "iv_gap_vs_neighbors": iv_gap,
+                        "price_gap_ticks": price_gap,
+                    }
+                ).reset_index()
+                frames.append(tmp)
+
+            return pd.concat(frames, ignore_index=True).sort_values(["day", "timestamp", "strike"]).reset_index(drop=True)
 
 
         def option_sensitivity_summary(option_prices: pd.DataFrame, underlying_prices: pd.DataFrame) -> pd.DataFrame:
@@ -337,8 +563,9 @@ cells.append(
         1. `HYDROGEL_PACK` should look like an anchored, mean-reverting delta-1 product around 10,000.
         2. `VELVETFRUIT_EXTRACT` should behave like the true underlying and carry the main directional information for the voucher complex.
         3. Voucher prices should be monotone in strike, with empirical sensitivity falling as strike rises.
-        4. Trade activity should cluster in the strikes that still move enough to matter, rather than the very deep OTM vouchers pinned near zero.
-        5. The most useful trading edge will likely be a hybrid of simple delta-1 trading in the underlyings plus relative-value quoting across the voucher ladder.
+        4. The implied-volatility smile should be broadly smooth in moneyness space, with only a small number of persistent strike-specific distortions.
+        5. Trade activity should cluster in the strikes that still move enough to matter, rather than the very deep OTM vouchers pinned near zero.
+        6. The most useful voucher edge should come from liquid, high-vega strikes where IV deviations are both measurable and tradable.
         """
     )
 )
@@ -1008,6 +1235,152 @@ cells.append(
 )
 
 cells.append(
+    md(
+        """
+        ## Voucher IV Surface
+
+        Raw voucher prices tell part of the story, but the more useful view is the volatility the market is already embedding.
+        This section inverts each quote to Black-Scholes implied volatility, then checks:
+
+        - where IV is actually defined versus where the quoted mid collapses to intrinsic value
+        - which strikes still have enough vega to justify volatility trading
+        - whether the smile is smooth in moneyness space
+        - which liquid strikes stay persistently rich or cheap relative to nearby strikes
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        # Summarize implied-volatility, moneyness, and vega structure across strike and day
+        iv_surface_summary = summarize_option_iv(option_prices)
+        smile_fit_by_day, smile_residual_by_day = fit_day_level_smile(iv_surface_summary)
+        neighbor_iv_outliers = build_neighbor_iv_outlier_frame(option_prices)
+        neighbor_iv_outlier_summary = (
+            neighbor_iv_outliers.groupby(["day", "product", "strike"])
+            .agg(
+                mean_iv_gap_vs_neighbors=("iv_gap_vs_neighbors", "mean"),
+                std_iv_gap_vs_neighbors=("iv_gap_vs_neighbors", "std"),
+                mean_price_gap_ticks=("price_gap_ticks", "mean"),
+                share_cheap_vs_neighbors=("iv_gap_vs_neighbors", lambda series: (series > 0).mean()),
+            )
+            .reset_index()
+            .sort_values(["day", "strike"])
+        )
+
+        display(iv_surface_summary.round(4))
+        display(smile_fit_by_day.round(4))
+        display(smile_residual_by_day.round(4))
+        display(neighbor_iv_outlier_summary.round(4))
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        # Plot the IV smile through strike, time, and normalized moneyness
+        avg_iv_by_strike = (
+            iv_surface_summary
+            .pivot(index="strike", columns="tte_days", values="mean_iv")
+            .sort_index()
+        )
+
+        fig = px.imshow(
+            avg_iv_by_strike,
+            origin="lower",
+            aspect="auto",
+            color_continuous_scale="Cividis",
+            title="Average implied volatility by strike and time to expiry",
+            labels={"x": "time to expiry (days)", "y": "strike", "color": "avg IV"},
+        )
+        fig.show()
+
+        smile_scatter = px.scatter(
+            iv_surface_summary,
+            x="mean_normalized_moneyness",
+            y="mean_iv",
+            color="day",
+            size="mean_vega",
+            hover_data={
+                "product": True,
+                "strike": True,
+                "tradeable_vega_share": ":.2f",
+                "invalid_iv_share": ":.2f",
+            },
+            title="Average IV smile versus normalized moneyness, sized by mean vega",
+        )
+        smile_scatter.update_layout(legend_title_text="day")
+        smile_scatter.show()
+
+        atm_iv_fig = px.line(
+            smile_fit_by_day,
+            x="tte_days",
+            y="atm_iv",
+            markers=True,
+            title="Day-level fitted ATM implied volatility through time",
+            hover_data={"day": True, "curvature": ":.4f", "linear_term": ":.4f"},
+        )
+        atm_iv_fig.update_xaxes(autorange="reversed")
+        atm_iv_fig.show()
+
+        smile_residual_fig = px.bar(
+            smile_residual_by_day,
+            x="strike",
+            y="iv_residual",
+            color="day",
+            barmode="group",
+            hover_data={"product": True, "mean_vega": ":.1f", "invalid_iv_share": ":.2f"},
+            title="Day-level IV residual versus fitted smile",
+        )
+        smile_residual_fig.add_hline(y=0, line_dash="dash", line_color="#111827")
+        smile_residual_fig.show()
+        """
+    )
+)
+
+cells.append(
+    code(
+        """
+        # Focus on liquid middle strikes: compare each strike's IV to the average of its immediate neighbors
+        liquid_outlier_rank = (
+            neighbor_iv_outlier_summary
+            .groupby(["product", "strike"])
+            .agg(
+                mean_iv_gap_vs_neighbors=("mean_iv_gap_vs_neighbors", "mean"),
+                mean_price_gap_ticks=("mean_price_gap_ticks", "mean"),
+                share_cheap_vs_neighbors=("share_cheap_vs_neighbors", "mean"),
+            )
+            .reset_index()
+            .sort_values("mean_price_gap_ticks", ascending=False)
+        )
+
+        display(liquid_outlier_rank.round(4))
+
+        outlier_fig = px.bar(
+            liquid_outlier_rank,
+            x="strike",
+            y="mean_price_gap_ticks",
+            color="share_cheap_vs_neighbors",
+            text="mean_price_gap_ticks",
+            title="Liquid-strike IV mispricing versus immediate neighbors",
+            hover_data={
+                "product": True,
+                "mean_iv_gap_vs_neighbors": ":.4f",
+                "share_cheap_vs_neighbors": ":.2f",
+            },
+            color_continuous_scale="RdBu",
+        )
+        outlier_fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        outlier_fig.add_hline(y=0, line_dash="dash", line_color="#111827")
+        outlier_fig.update_yaxes(title="approx price gap in ticks from neighbor-IV interpolation")
+        outlier_fig.show()
+        """
+    )
+)
+
+cells.append(
     code(
         """
         # Empirical voucher sensitivity: estimate how strongly each strike moves with the underlying
@@ -1129,6 +1502,26 @@ cells.append(
         top_trade_strike = float(voucher_trade_summary.sort_values("trade_count", ascending=False)["strike"].iloc[0])
         max_beta_strike = float(sensitivity.sort_values("beta_1tick", ascending=False)["strike"].iloc[0])
         dead_strikes = sensitivity.loc[sensitivity["beta_1tick"].fillna(0) <= 0.01, "strike"].astype(int).tolist()
+        best_vega_strike = float(
+            iv_surface_summary.groupby("strike")["mean_vega"].mean().sort_values(ascending=False).index[0]
+        )
+        cheap_liquid_strike = liquid_outlier_rank.iloc[0]
+        rich_liquid_strike = liquid_outlier_rank.iloc[-1]
+        atm_iv_mean = float(smile_fit_by_day["atm_iv"].mean())
+        problematic_intrinsic_strikes = (
+            iv_surface_summary.groupby("strike")["invalid_iv_share"]
+            .mean()
+            .loc[lambda series: series >= 0.05]
+            .index.astype(int)
+            .tolist()
+        )
+        low_vega_tail_strikes = (
+            iv_surface_summary.groupby("strike")["mean_vega"]
+            .mean()
+            .loc[lambda series: series <= 20.0]
+            .index.astype(int)
+            .tolist()
+        )
 
         commentary = f'''
         ## Strategy Translation
@@ -1136,9 +1529,12 @@ cells.append(
         - `HYDROGEL_PACK`: the data supports an anchored market-making / mean-reversion stance. When Hydrogel is far below the 10,000 anchor, subsequent 5-tick returns turn positive on average; when it is far above the anchor, those forward returns turn negative. That is a clean fit for inventory-aware quoting around a fixed fair.
         - `HYDROGEL_PACK` informed-flow check: the best-level imbalance signal is real but moderate, with future-5 correlation **{hydrogel_informed_corr:.3f}**. I would use it as a skew input on top of the fixed-fair strategy, not as the whole trading logic.
         - `VELVETFRUIT_EXTRACT`: the underlying carries the real directional signal. Its rolling slope is positive on average for **{extract_positive_share:.2%}** of the sample, with mean intraday change of **{extract_mean_change:,.2f}** ticks, and its best-level imbalance has future-5 correlation **{extract_informed_corr:.3f}**. That suggests a lighter-touch directional bias plus imbalance-based quote skew is more appropriate than hard mean reversion.
-        - Vouchers: the most useful strikes are the middle of the ladder, not the tails. The highest empirical 1-tick sensitivity shows up around strike **{max_beta_strike:,.0f}**, while actual trade activity peaks around **{top_trade_strike:,.0f}**. Those are the best candidates for active quoting and relative-value checks.
-        - Deep OTM vouchers are effectively pinned. Strikes **{dead_strikes}** show near-zero empirical beta, so they are poor vehicles for directional expression unless the market gifts us mispriced optionality.
-        - One caution: the dataset contains many rows where quoted voucher mids sit below simple intrinsic value. I would treat `mid - intrinsic` as a market diagnostic rather than a strict no-arbitrage signal, and only lean on it when the discount is large and tradable in the actual book.
+        - Voucher volatility structure is mostly stable. The fitted day-level ATM IV sits around **{atm_iv_mean:.3f}**, and the highest average vega lives near strike **{best_vega_strike:,.0f}**. That is where volatility mispricing is most actionable because the smile still has curvature and the instrument still moves.
+        - The cleanest liquid-strike outlier is **{cheap_liquid_strike["product"]}**. Relative to the average of its immediate neighbors it screens about **{cheap_liquid_strike["mean_iv_gap_vs_neighbors"]:.4f} IV points cheap**, or roughly **{cheap_liquid_strike["mean_price_gap_ticks"]:.2f} ticks** underpriced on average. That is the best buy-vol / buy-voucher candidate in the middle of the ladder.
+        - The matching rich-side signal is **{rich_liquid_strike["product"]}**. It sits about **{abs(rich_liquid_strike["mean_iv_gap_vs_neighbors"]):.4f} IV points rich** versus neighbors, worth roughly **{abs(rich_liquid_strike["mean_price_gap_ticks"]):.2f} ticks** of overpricing on average. That is the clearest sell-vol / sell-voucher candidate among the liquid strikes.
+        - Deep OTM vouchers are effectively pinned. Strikes **{dead_strikes}** show near-zero empirical beta, while strikes **{low_vega_tail_strikes}** have very low vega despite eye-catching headline IV levels. I would not size those the same way as the middle strikes because the signal-to-noise ratio is much worse.
+        - Deep ITM vouchers also need caution. Strikes **{problematic_intrinsic_strikes}** spend a meaningful share of time with mids at or below intrinsic, so they behave more like discounted delta instruments than clean volatility expressions.
+        - Put differently: size should follow both deviation and vega. The middle strikes justify larger relative-value positions when the smile gets kinked; the wings mostly justify smaller, more skeptical positioning unless the dislocation is extreme and clearly tradable in the displayed book.
         '''
         display(Markdown(commentary))
         """
@@ -1155,12 +1551,14 @@ cells.append(
         - `HYDROGEL_PACK` looks like the clean fixed-fair product in the set and should support an anchored quoting strategy.
         - `VELVETFRUIT_EXTRACT` behaves like the underlying state variable the voucher ladder reacts to.
         - Voucher prices are orderly by strike, their empirical sensitivity falls as strike rises, and trading concentrates in the middle strikes rather than the dead tail.
+        - The IV smile is mostly coherent, but the liquid middle is not perfectly smooth: `VEV_5400` screens persistently cheap versus nearby strikes, while `VEV_5300` looks consistently rich.
+        - The wings are much less useful for pure vol trading: `VEV_4000` / `VEV_4500` frequently collapse to intrinsic, and `VEV_6000` / `VEV_6500` print huge IVs with very little vega behind them.
 
         The natural next step after this notebook is to convert these observations into a fill-aware trader:
 
         - mean-reverting market making in `HYDROGEL_PACK`
         - modest directional / inventory-aware trading in `VELVETFRUIT_EXTRACT`
-        - voucher quoting focused on the liquid middle strikes plus simple cross-strike consistency checks
+        - voucher quoting focused on the liquid middle strikes, with exposure scaled by both smile deviation and vega rather than raw price alone
         """
     )
 )
