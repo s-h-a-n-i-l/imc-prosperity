@@ -41,10 +41,6 @@ except ImportError:
 PEPPER = "INTARIAN_PEPPER_ROOT"
 OSMIUM = "ASH_COATED_OSMIUM"
 
-# Starting cash allocation across products.
-PEPPER_STARTING_CASH_PROPORTION = 0.80
-OSMIUM_STARTING_CASH_PROPORTION = 0.20
-
 PEPPER_EXCHANGE_LIMIT = 80
 OSMIUM_EXCHANGE_LIMIT = 80
 PEPPER_REFERENCE_MID = 10400.0
@@ -736,9 +732,6 @@ class Trader:
         osmium_memory.setdefault("last_taker_qty", 0.0)
 
         portfolio = data["portfolio"]
-        portfolio.setdefault("starting_cash", None)
-        portfolio.setdefault("cash", {PEPPER: 0.0, OSMIUM: 0.0})
-        portfolio.setdefault("last_trade_timestamp", {PEPPER: -1, OSMIUM: -1})
         portfolio.setdefault("reference_mids", {PEPPER: PEPPER_REFERENCE_MID, OSMIUM: OSMIUM_REFERENCE_MID})
         portfolio.setdefault("limits", {PEPPER: PEPPER_EXCHANGE_LIMIT, OSMIUM: OSMIUM_EXCHANGE_LIMIT})
         portfolio.setdefault("last_total_pnl", 0.0)
@@ -786,9 +779,6 @@ class Trader:
                 "last_taker_qty": 0.0,
             },
             "portfolio": {
-                "starting_cash": None,
-                "cash": {PEPPER: 0.0, OSMIUM: 0.0},
-                "last_trade_timestamp": {PEPPER: -1, OSMIUM: -1},
                 "reference_mids": {PEPPER: PEPPER_REFERENCE_MID, OSMIUM: OSMIUM_REFERENCE_MID},
                 "limits": {PEPPER: PEPPER_EXCHANGE_LIMIT, OSMIUM: OSMIUM_EXCHANGE_LIMIT},
                 "last_total_pnl": 0.0,
